@@ -14,6 +14,8 @@ from megatron.legacy import fused_kernels
 from megatron.training import get_adlr_autoresume
 from megatron.training import get_args
 from megatron.training import get_tensorboard_writer
+from megatron.training import get_hetero_context
+from megatron.training.global_vars import set_hetero_context
 from megatron.core import mpu, tensor_parallel
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.yaml_arguments import validate_yaml
@@ -241,22 +243,52 @@ def _initialize_distributed():
             timeout=timedelta(minutes=args.distributed_timeout_minutes),
         )
 
+    if args.hetero_mode is not None:
+        # Build the heterogenous context after torch.distributed is initialized and
+        # before model parallel is initialized.
+        set_hetero_context(args)
+        if torch.distributed.get_rank() == 0:
+            print(get_hetero_context(), flush=True)
     # Set the tensor model-parallel, pipeline model-parallel, and
     # data-parallel communicators.
     if device_count > 0:
         if mpu.model_parallel_is_initialized():
             print("model parallel is already initialized")
         else:
-            mpu.initialize_model_parallel(
-                args.tensor_model_parallel_size,
-                args.pipeline_model_parallel_size,
-                args.virtual_pipeline_model_parallel_size,
-                args.pipeline_model_parallel_split_rank,
-                context_parallel_size=args.context_parallel_size,
-                expert_model_parallel_size=args.expert_model_parallel_size,
-                distributed_timeout_minutes=args.distributed_timeout_minutes,
-                nccl_communicator_config_path=args.nccl_communicator_config_path,
-            )
+            if args.hetero_mode is None:
+                mpu.initialize_model_parallel(
+                    args.tensor_model_parallel_size,
+                    args.pipeline_model_parallel_size,
+                    args.virtual_pipeline_model_parallel_size,
+                    args.pipeline_model_parallel_split_rank,
+                    context_parallel_size=args.context_parallel_size,
+                    expert_model_parallel_size=args.expert_model_parallel_size,
+                    distributed_timeout_minutes=args.distributed_timeout_minutes,
+                    nccl_communicator_config_path=args.nccl_communicator_config_path,
+                )
+            elif args.hetero_mode == "dp":
+                mpu.initialize_model_parallel_hetero_dp(
+                    args.tensor_model_parallel_size,
+                    args.pipeline_model_parallel_size,
+                    args.virtual_pipeline_model_parallel_size,
+                    args.pipeline_model_parallel_split_rank,
+                    args.fp8 is not None,
+                )
+            elif args.hetero_mode == "pp":
+                mpu.initialize_model_parallel_hetero_pp(
+                    args.tensor_model_parallel_size,
+                    args.pipeline_model_parallel_size,
+                    args.virtual_pipeline_model_parallel_size,
+                    args.pipeline_model_parallel_split_rank,
+                    context_parallel_size=args.context_parallel_size,
+                    expert_model_parallel_size=args.expert_model_parallel_size,
+                    use_fp8=args.fp8 is not None,
+                )
+            else:
+                raise ValueError(
+                    "Hetero mode {} not supported".format(args.hetero_mode)
+                )
+
             if args.rank == 0:
                 print(
                     f"> initialized tensor model parallel with size "

@@ -131,14 +131,25 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         self.bias_dropout_add_exec_handler = torch.enable_grad
 
     def _get_layer_offset(self):
-
+        from megatron.training import get_args
+        args = get_args()
         pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
 
         num_layers_per_pipeline_rank = (
             self.config.num_layers // parallel_state.get_pipeline_model_parallel_world_size()
         )
 
-        if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
+        if args.hetero_mode == "pp":
+            # Only pipeline parallelism is supported.
+            pipeline_stages = [item for sublist in args.hetero_pipeline_stages for item in sublist]
+            offset = sum(([0] + pipeline_stages)[: pipeline_rank + 1])
+            num_layers = pipeline_stages[pipeline_rank]
+            torch.distributed.barrier()
+            for i in range(torch.distributed.get_world_size()):
+                if i == torch.distributed.get_rank():
+                    print("pipeline_rank:", pipeline_rank, "offset:", offset, "num_layers:", num_layers, flush=True)
+                torch.distributed.barrier()
+        elif parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             vp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
             vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
 
